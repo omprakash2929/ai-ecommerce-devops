@@ -1,0 +1,135 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKERHUB_USER = 'YOUR_DOCKERHUB_USERNAME'      // <-- change this
+        IMAGE_NAME     = "${DOCKERHUB_USER}/nexvion"
+        IMAGE_TAG      = "${BUILD_NUMBER}"
+        SMOKE_PORT     = '18080'
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'ls -la'
+            }
+        }
+
+        stage('Lint') {
+            steps {
+                // HTML lint + JS syntax check, run inside throwaway containers
+                sh '''
+                    docker run --rm -v "$WORKSPACE:/src" -w /src node:20-alpine \
+                        npx --yes htmlhint "application/**/*.html"
+
+                    docker run --rm -v "$WORKSPACE:/src" -w /src node:20-alpine \
+                        sh -c 'for f in application/*.js; do echo "check $f"; node --check "$f" || exit 1; done'
+                '''
+            }
+        }
+
+        stage('Secret Scan') {
+            steps {
+                sh '''
+                    docker run --rm -v "$WORKSPACE:/repo" zricethezav/gitleaks:latest \
+                        detect --no-git --source=/repo --redact --exit-code 1
+                '''
+            }
+        }
+
+        stage('Dependency / FS Scan') {
+            steps {
+                sh '''
+                    docker run --rm -v "$WORKSPACE:/src" -v trivy-cache:/root/.cache/ \
+                        aquasec/trivy:latest fs --exit-code 1 --severity HIGH,CRITICAL /src
+                '''
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    docker build -f docker/Dockerfile \
+                        -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                        -t ${IMAGE_NAME}:latest .
+                '''
+            }
+        }
+
+        stage('Image Scan') {
+            steps {
+                sh '''
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v trivy-cache:/root/.cache/ \
+                        aquasec/trivy:latest image \
+                        --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+                        ${IMAGE_NAME}:${IMAGE_TAG}
+                '''
+            }
+        }
+
+        stage('Smoke Test') {
+            steps {
+                sh '''
+                    docker rm -f nexvion-smoke 2>/dev/null || true
+                    docker run -d --name nexvion-smoke -p ${SMOKE_PORT}:8080 ${IMAGE_NAME}:${IMAGE_TAG}
+                    sleep 5
+                    bash scripts/smoke-test.sh http://localhost:${SMOKE_PORT}
+                '''
+            }
+            post {
+                always {
+                    sh 'docker rm -f nexvion-smoke 2>/dev/null || true'
+                }
+            }
+        }
+
+        stage('Push Image') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds',
+                                                  usernameVariable: 'DH_USER',
+                                                  passwordVariable: 'DH_PASS')]) {
+                    sh '''
+                        echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
+                        docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                        docker push ${IMAGE_NAME}:latest
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                sh '''
+                    export IMAGE=${IMAGE_NAME}:${IMAGE_TAG}
+                    docker compose -f docker/docker-compose.yml up -d
+                '''
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                sh '''
+                    sleep 5
+                    bash scripts/smoke-test.sh http://localhost:8080
+                '''
+            }
+        }
+    }
+
+    post {
+        success { echo "Deployment success: ${IMAGE_NAME}:${IMAGE_TAG}" }
+        failure { echo 'Pipeline failed - check the stage logs above.' }
+        always  { sh 'docker image prune -f || true' }
+    }
+}

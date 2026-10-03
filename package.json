@@ -1,0 +1,13 @@
+{
+  "name": "nexvion-ci",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CI tooling for the Nexvion static frontend",
+  "scripts": {
+    "lint": "htmlhint \"application/**/*.html\"",
+    "test": "node tests/validate.js"
+  },
+  "devDependencies": {
+    "htmlhint": "^1.1.4"
+  }
+}
