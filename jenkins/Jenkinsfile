@@ -1,11 +1,9 @@
 pipeline {
     agent any
 
-    environment {
-        DOCKERHUB_USER = 'YOUR_DOCKERHUB_USERNAME'      // <-- change this
-        IMAGE_NAME     = "${DOCKERHUB_USER}/nexvion"
-        IMAGE_TAG      = "${BUILD_NUMBER}"
-        SMOKE_PORT     = '18080'
+    // GitHub Push -> Jenkins Trigger (polls the repo every 2 minutes)
+    triggers {
+        pollSCM('H/2 * * * *')
     }
 
     options {
@@ -14,43 +12,72 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '10'))
     }
 
+    environment {
+        DOCKERHUB_USER = 'omprakash2929'         
+        IMAGE_NAME     = "${DOCKERHUB_USER}/nexvion"
+        IMAGE_TAG      = "${BUILD_NUMBER}"
+        KUBECONFIG     = '/var/lib/jenkins/.kube/config'
+        K8S_NAMESPACE  = 'nexvion'
+        NODE_PORT      = '30080'
+        NODE_RUN       = 'docker run --rm --user 1000:1000 -e HOME=/tmp -e npm_config_cache=/src/.npm-cache -v $WORKSPACE:/src -w /src node:20-alpine'
+    }
+
     stages {
 
-        stage('Checkout') {
+        stage('Checkout Source') {
             steps {
                 checkout scm
                 sh 'ls -la'
             }
         }
 
-        stage('Lint') {
+        stage('Install Dependencies') {
             steps {
-                // HTML lint + JS syntax check, run inside throwaway containers
-                sh '''
-                    docker run --rm -v "$WORKSPACE:/src" -w /src node:20-alpine \
-                        npx --yes htmlhint "application/**/*.html"
+                sh '$NODE_RUN npm install --no-audit --no-fund'
+            }
+        }
 
-                    docker run --rm -v "$WORKSPACE:/src" -w /src node:20-alpine \
-                        sh -c 'for f in application/*.js; do echo "check $f"; node --check "$f" || exit 1; done'
+        stage('Build') {
+            steps {
+                sh '''
+                    rm -rf dist && mkdir -p dist
+                    cp -r application/. dist/
+                    tar czf nexvion-${BUILD_NUMBER}.tgz -C dist .
+                '''
+                archiveArtifacts artifacts: 'nexvion-*.tgz', fingerprint: true
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh '''
+                    $NODE_RUN npm run lint
+                    $NODE_RUN npm test
+                    docker run --rm -v "$WORKSPACE:/src" -w /src alpine/helm:latest lint helm/ecommerce
                 '''
             }
         }
 
-        stage('Secret Scan') {
-            steps {
-                sh '''
-                    docker run --rm -v "$WORKSPACE:/repo" zricethezav/gitleaks:latest \
-                        detect --no-git --source=/repo --redact --exit-code 1
-                '''
-            }
-        }
-
-        stage('Dependency / FS Scan') {
-            steps {
-                sh '''
-                    docker run --rm -v "$WORKSPACE:/src" -v trivy-cache:/root/.cache/ \
-                        aquasec/trivy:latest fs --exit-code 1 --severity HIGH,CRITICAL /src
-                '''
+        stage('Security Checks') {
+            parallel {
+                stage('Secret Scan (Gitleaks)') {
+                    steps {
+                        sh '''
+                            docker run --rm -v "$WORKSPACE:/repo" zricethezav/gitleaks:latest \
+                                detect --no-git --source=/repo --redact --exit-code 1
+                        '''
+                    }
+                }
+                stage('Dependency Scan (Trivy fs)') {
+                    steps {
+                        sh '''
+                            docker run --rm -v "$WORKSPACE:/src" -v trivy-cache:/root/.cache/ \
+                                aquasec/trivy:latest fs \
+                                --skip-dirs /src/node_modules --skip-dirs /src/.npm-cache \
+                                --exit-code 1 --severity HIGH,CRITICAL /src
+                        '''
+                    }
+                }
             }
         }
 
@@ -77,22 +104,6 @@ pipeline {
             }
         }
 
-        stage('Smoke Test') {
-            steps {
-                sh '''
-                    docker rm -f nexvion-smoke 2>/dev/null || true
-                    docker run -d --name nexvion-smoke -p ${SMOKE_PORT}:8080 ${IMAGE_NAME}:${IMAGE_TAG}
-                    sleep 5
-                    bash scripts/smoke-test.sh http://localhost:${SMOKE_PORT}
-                '''
-            }
-            post {
-                always {
-                    sh 'docker rm -f nexvion-smoke 2>/dev/null || true'
-                }
-            }
-        }
-
         stage('Push Image') {
             steps {
                 withCredentials([usernamePassword(credentialsId: 'dockerhub-creds',
@@ -108,11 +119,17 @@ pipeline {
             }
         }
 
-        stage('Deploy') {
+        stage('Deploy to k3s (Helm)') {
             steps {
                 sh '''
-                    export IMAGE=${IMAGE_NAME}:${IMAGE_TAG}
-                    docker compose -f docker/docker-compose.yml up -d
+                    helm upgrade --install nexvion helm/ecommerce \
+                        --namespace ${K8S_NAMESPACE} --create-namespace \
+                        --set image.repository=${IMAGE_NAME} \
+                        --set image.tag=${IMAGE_TAG} \
+                        --atomic --timeout 3m
+
+                    kubectl -n ${K8S_NAMESPACE} rollout status deployment/nexvion --timeout=120s
+                    kubectl -n ${K8S_NAMESPACE} get pods,svc,ingress
                 '''
             }
         }
@@ -120,16 +137,33 @@ pipeline {
         stage('Health Check') {
             steps {
                 sh '''
-                    sleep 5
-                    bash scripts/smoke-test.sh http://localhost:8080
+                    for i in $(seq 1 10); do
+                        if bash scripts/smoke-test.sh http://localhost:${NODE_PORT}; then
+                            exit 0
+                        fi
+                        echo "App not ready yet, retry $i/10..."
+                        sleep 5
+                    done
+                    echo "Health check failed"
+                    exit 1
                 '''
+            }
+        }
+
+        stage('Deployment Success') {
+            steps {
+                echo "Nexvion ${IMAGE_NAME}:${IMAGE_TAG} is live on k3s (NodePort ${NODE_PORT})"
             }
         }
     }
 
     post {
-        success { echo "Deployment success: ${IMAGE_NAME}:${IMAGE_TAG}" }
-        failure { echo 'Pipeline failed - check the stage logs above.' }
-        always  { sh 'docker image prune -f || true' }
+        failure {
+            echo 'Pipeline FAILED - open the red stage and read its log.'
+            sh 'kubectl -n ${K8S_NAMESPACE} get pods || true'
+        }
+        always {
+            sh 'docker image prune -f || true'
+        }
     }
 }
