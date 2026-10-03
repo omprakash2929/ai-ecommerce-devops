@@ -1,0 +1,31 @@
+# Values for kube-prometheus-stack on a single-node k3s VM
+alertmanager:
+  enabled: false
+
+grafana:
+  service:
+    type: NodePort
+    nodePort: 32000
+
+prometheus:
+  service:
+    type: NodePort
+    nodePort: 32090
+  prometheusSpec:
+    retention: 3d
+    # pick up ServiceMonitors from every namespace (e.g. our nexvion namespace)
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        memory: 400Mi
+
+# k3s does not expose these control-plane endpoints, so their targets would show "down"
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
