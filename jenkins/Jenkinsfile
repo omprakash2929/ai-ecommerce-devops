@@ -13,7 +13,7 @@ pipeline {
     }
 
     environment {
-        DOCKERHUB_USER = 'omprakash2929'         
+        DOCKERHUB_USER = 'omprakash2929'
         IMAGE_NAME     = "${DOCKERHUB_USER}/nexvion"
         IMAGE_TAG      = "${BUILD_NUMBER}"
         KUBECONFIG     = '/var/lib/jenkins/.kube/config'
