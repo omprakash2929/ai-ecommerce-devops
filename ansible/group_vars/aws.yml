@@ -1,0 +1,4 @@
+---
+# AWS server pe zyada strict settings
+enable_ufw: true
+ssh_disable_password_auth: true

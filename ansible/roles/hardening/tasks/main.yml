@@ -1,0 +1,74 @@
+---
+- name: Install security packages
+  ansible.builtin.apt:
+    name:
+      - fail2ban
+      - unattended-upgrades
+      - ufw
+    state: present
+
+- name: SSH hardening drop-in (00- prefix so it wins over cloud-init files)
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/00-nexvion-hardening.conf
+    content: |
+      PermitRootLogin {{ ssh_permit_root_login }}
+      PasswordAuthentication {{ 'no' if ssh_disable_password_auth else 'yes' }}
+      MaxAuthTries {{ ssh_max_auth_tries }}
+      X11Forwarding no
+    mode: "0644"
+  register: ssh_config
+
+- name: Validate sshd configuration
+  ansible.builtin.command: sshd -t
+  changed_when: false
+  when: ssh_config is changed
+  notify: Restart ssh
+
+- name: Enable fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true
+
+- name: Kernel hardening (sysctl)
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-nexvion.conf
+    content: |
+      net.ipv4.tcp_syncookies = 1
+      net.ipv4.conf.all.accept_redirects = 0
+      net.ipv4.conf.all.send_redirects = 0
+    mode: "0644"
+  notify: Reload sysctl
+
+- name: Firewall (UFW) for k3s node
+  when: enable_ufw | bool
+  block:
+    - name: UFW forward policy must be ACCEPT for Kubernetes
+      ansible.builtin.lineinfile:
+        path: /etc/default/ufw
+        regexp: '^DEFAULT_FORWARD_POLICY='
+        line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+
+    - name: Allow service ports
+      community.general.ufw:
+        rule: allow
+        port: "{{ item | string }}"
+        proto: tcp
+      loop: "{{ ufw_allowed_tcp_ports }}"
+
+    - name: Allow k3s pod and service networks
+      community.general.ufw:
+        rule: allow
+        src: "{{ item }}"
+      loop:
+        - "{{ k3s_pod_cidr }}"
+        - "{{ k3s_service_cidr }}"
+
+    - name: Default deny incoming
+      community.general.ufw:
+        default: deny
+        direction: incoming
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled

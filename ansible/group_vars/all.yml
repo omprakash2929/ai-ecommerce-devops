@@ -1,0 +1,49 @@
+---
+# user jis ke liye kubeconfig / docker group configure hoga
+target_user: "{{ ansible_user }}"
+
+base_packages:
+  - curl
+  - wget
+  - git
+  - vim
+  - unzip
+  - jq
+  - htop
+  - net-tools
+  - ca-certificates
+  - gnupg
+  - python3-pip
+  - python3-debian
+  - fontconfig
+
+project_dirs:
+  - /opt/nexvion
+  - /opt/nexvion/backup
+  - /opt/nexvion/logs
+
+# Jenkins
+install_jenkins: true
+jenkins_port: 8080
+
+# k3s ("" = latest stable)
+k3s_version: ""
+install_helm: true
+
+# Hardening
+ssh_permit_root_login: "no"
+ssh_disable_password_auth: false   # key login confirm karne ke baad true karo
+ssh_max_auth_tries: 4
+enable_ufw: false
+
+ufw_allowed_tcp_ports:
+  - 22
+  - 80
+  - 443
+  - 6443
+  - 8080
+  - 30080
+  - 32000
+  - 32090
+k3s_pod_cidr: 10.42.0.0/16
+k3s_service_cidr: 10.43.0.0/16

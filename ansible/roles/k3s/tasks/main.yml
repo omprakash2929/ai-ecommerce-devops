@@ -1,0 +1,54 @@
+---
+- name: Install k3s
+  ansible.builtin.shell: >-
+    curl -sfL https://get.k3s.io |
+    {% if k3s_version %}INSTALL_K3S_VERSION={{ k3s_version }} {% endif %}sh -
+  args:
+    creates: /usr/local/bin/k3s
+
+- name: Wait for the k3s node to be Ready
+  ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+  changed_when: false
+
+- name: Create .kube directory for target user
+  ansible.builtin.file:
+    path: "/home/{{ target_user }}/.kube"
+    state: directory
+    owner: "{{ target_user }}"
+    group: "{{ target_user }}"
+    mode: "0700"
+
+- name: Copy kubeconfig for target user
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "/home/{{ target_user }}/.kube/config"
+    remote_src: true
+    owner: "{{ target_user }}"
+    group: "{{ target_user }}"
+    mode: "0600"
+
+- name: Kubeconfig for Jenkins
+  when: install_jenkins | bool
+  block:
+    - name: Create Jenkins .kube directory
+      ansible.builtin.file:
+        path: /var/lib/jenkins/.kube
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: "0700"
+
+    - name: Copy kubeconfig for Jenkins
+      ansible.builtin.copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: /var/lib/jenkins/.kube/config
+        remote_src: true
+        owner: jenkins
+        group: jenkins
+        mode: "0600"
+
+- name: Install Helm
+  when: install_helm | bool
+  ansible.builtin.shell: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  args:
+    creates: /usr/local/bin/helm
