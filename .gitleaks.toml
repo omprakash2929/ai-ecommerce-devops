@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "ignore generated folders"
+paths = [
+  '''node_modules''',
+  '''\.npm-cache''',
+  '''dist''',
+]
